@@ -83,6 +83,7 @@ def get_pkg_license(image_name, pkg):
     name = pkg["name"].split(":")[0]
     license_file = get_pkg_license.format(name)
     cat_license_cmd = docker_run + license_file
+    # TODO(rahulunair): please fix this
     cat_license = subprocess.run(
         cat_license_cmd, stdout=subprocess.PIPE, shell=True
     ).stdout.decode("utf-8")
