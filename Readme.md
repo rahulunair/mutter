@@ -12,12 +12,6 @@ and is too lazy to search for all the packages and extract their licenses manual
 ## Usage
 
 ```bash
-python mutt.py --base_image <image_name> --final_image <image_name>
-```
-
-or 
-
-```bash
 python mutt.py <base_image> <final_image>
 ```
 
