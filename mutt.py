@@ -1,4 +1,5 @@
 import argparse
+from functools import lru_cache
 import re
 import subprocess
 
@@ -24,13 +25,53 @@ def cf_parse():
     args = parser.parse_args()
     return args
 
+@lru_cache
+def docker_run(image_name):
+    """spawn a docker image in daemon mode and return id"""
+    docker_run = f"docker run -dt {image_name}"
+    container_id = (
+        subprocess.run(docker_run, stdout=subprocess.PIPE, shell=True)
+        .stdout.decode("utf-8")
+        .rstrip()
+    )
+    return container_id
 
-def get_pkgs_vers(image_name):
+
+def get_os_version(container_id):
+    os_meta = {}
+    docker_attach = f"docker exec -t {container_id} bash -c "
+    release_file = "cat /etc/os-release 2>/dev/null"
+    run_cmd = f"{docker_attach}'{release_file}"
+    os_meta["name"] = f"{run_cmd} | grep -i -m1 name | cut -d= -f2'"
+    os_meta["version"] = f"{run_cmd} | grep -i -m1 version | cut -d= -f2'"
+    os_meta["name"] = (
+        subprocess.run(os_meta["name"], stdout=subprocess.PIPE, shell=True)
+        .stdout.decode("utf-8")
+        .lower()
+        .rstrip()
+        .replace('"', "")
+    )
+    os_meta["version"] = (
+        subprocess.run(os_meta["version"], stdout=subprocess.PIPE, shell=True)
+        .stdout.decode("utf-8")
+        .lower()
+        .rstrip()
+        .replace('"', "")
+    )
+    os_name = os_meta["name"].lower()
+    if os_name == "fedora" or os_name == "centos":
+        os_meta["pkg_tool"] = "rpm"
+    elif os_name == "ubuntu" or os_name == "debian":
+        os_meta["pkg_tool"] = "dpkg"
+    return os_meta
+
+
+def get_pkgs_vers(container_id):
     """parse dpkg to get installed package names and version from a docker image"""
-    docker_run = f"docker run -t {image_name}"
+    docker_attach = f"docker exec -t {container_id} bash -c "
     get_pkgs_vers = "'dpkg -l | tail -n +6 | '"
     get_pkgs_vers += 'sort | awk  \'BEGIN{ OFS=";"}{ printf "%s,%s\\n", $2, $3 }\''
-    docker_get_pkgs_vers = f"{docker_run} bash -c {get_pkgs_vers}"
+    docker_get_pkgs_vers = f"{docker_attach} bash -c {get_pkgs_vers}"
     pkgs_vers = set()
     try:
         vals = (
@@ -46,7 +87,7 @@ def get_pkgs_vers(image_name):
 
 def get_user_added_pkgs(base_image, final_image=None):
     """get unique packages that were installed in the final image"""
-    if base_image and final_image:
+    if final_image is not None:
         base_pkgs_vers, final_pkgs_vers = (
             get_pkgs_vers(base_image),
             get_pkgs_vers(final_image),
@@ -72,9 +113,9 @@ def get_user_added_pkgs(base_image, final_image=None):
 
 def get_pkg_license(image_name, pkg):
     """a terrible fuzzy search of licenses"""
-    docker_run = f"docker run -t {image_name} bash -c "
+    docker_attach = f"docker exec -t {container_id} bash -c "
     get_pkg_license = (
-        "'cat /usr/share/doc/{}/copyright | "
+        '\'cat /usr/share/doc/{}/copyright 2>/dev/null || echo "No License file" | '
         "grep -Ew -m1 "
         '"(BSD|GPL|MPL|Mozilla|'
         "Apache|Creative|Artistic|"
@@ -82,7 +123,7 @@ def get_pkg_license(image_name, pkg):
     )
     name = pkg["name"].split(":")[0]
     license_file = get_pkg_license.format(name)
-    cat_license_cmd = docker_run + license_file
+    cat_license_cmd = docker_attach + license_file
     # TODO(rahulunair): please fix this
     cat_license = subprocess.run(
         cat_license_cmd, stdout=subprocess.PIPE, shell=True
@@ -90,7 +131,7 @@ def get_pkg_license(image_name, pkg):
     return name, cat_license
 
 
-def print_final_pkgs(final_image, uniq_pkgs, file=None):
+def print_final_pkgs(container_id, uniq_pkgs, file=None):
     """print pkgs one per line"""
     pkgs_vers = pd.DataFrame(columns=["name", "version", "license"])
     final_pkgs_vers = pd.DataFrame(uniq_pkgs, columns=["name_version"])
@@ -98,19 +139,20 @@ def print_final_pkgs(final_image, uniq_pkgs, file=None):
         final_pkgs_vers["name_version"].str.split(",", 1).str
     )
     for _, pkg in pkgs_vers.iterrows():
-        _, license_text = get_pkg_license(final_image, pkg)
+        _, license_text = get_pkg_license(container_id, pkg)
         pkgs_vers.loc[
             pkgs_vers["name"] == pkg["name"], "license"
         ] = license_text.rstrip()
     pkgs_vers.to_csv(file)
-    with pd.option_context("display.max_rows", None, "display.max_columns", None):
-        print(pkgs_vers)
 
 
 if __name__ == "__main__":
     args = cf_parse()
-    uniq_pkgs = get_user_added_pkgs(args.base_image, args.final_image)
-    if args.final_image is None:
+    base_cid = docker_run(args.base_image)
+    if args.final_image is not None:
+        final_cid = docker_run(args.final_image)
+        uniq_pkgs = get_user_added_pkgs(base_cid, final_cid)
         print_final_pkgs(args.base_image, uniq_pkgs, file="pkg_licenses.csv")
     else:
+        uniq_pkgs = get_user_added_pkgs(base_cid)
         print_final_pkgs(args.final_image, uniq_pkgs, file="pkg_licenses.csv")
